@@ -318,7 +318,7 @@ fn map_post(raw: &Media) -> Option<OutPost> {
     })
 }
 
-fn map_story(raw: &TrayReel) -> Option<OutStory> {
+fn map_tray_story(raw: &TrayReel) -> Option<OutStory> {
     let user = raw.user.as_ref()?;
     let author = map_user(user);
     Some(OutStory {
@@ -416,7 +416,7 @@ pub fn map_tray(json: &[u8]) -> Option<String> {
     let stories: Vec<OutStory> = resp
         .tray
         .as_ref()
-        .map(|tray| tray.iter().filter_map(map_story).collect())
+        .map(|tray| tray.iter().filter_map(map_tray_story).collect())
         .unwrap_or_default();
     to_json(&stories)
 }
