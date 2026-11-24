@@ -61,6 +61,7 @@ final class FeedViewModel: ObservableObject {
 struct FeedView: View {
     @StateObject private var model = FeedViewModel()
     @ObservedObject private var governor = RequestGovernor.shared
+    @ObservedObject private var session = SessionManager.shared
 
     var body: some View {
         NavigationStack {
@@ -90,6 +91,12 @@ struct FeedView: View {
         }
         .refreshable { await model.loadInitial() }
         .task { if model.posts.isEmpty { await model.loadInitial() } }
+        .onReceive(session.$isAuthenticated) { authenticated in
+            // Instagram disowned the session: drop the error and let the
+            // login screen take over, rather than leave a dead feed.
+            guard !authenticated else { return }
+            model.errorMessage = nil
+        }
         .onReceive(governor.cooldownEnded) { _ in
             // The block lifted on its own: fill the empty feed back in.
             guard model.posts.isEmpty else { return }

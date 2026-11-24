@@ -12,6 +12,7 @@ import SwiftUI
 
 struct MessagesView: View {
     @ObservedObject private var governor = RequestGovernor.shared
+    @ObservedObject private var session = SessionManager.shared
 
     @State private var threads: [DirectThread] = []
     @State private var isLoading = true
@@ -50,6 +51,12 @@ struct MessagesView: View {
             }
             .sheet(isPresented: $showWebFallback) {
                 webFallback
+            }
+            .onReceive(session.$isAuthenticated) { authenticated in
+                // Instagram disowned the session: drop the error and let the
+                // login screen take over, rather than leave a dead screen.
+                guard !authenticated else { return }
+                errorMessage = nil
             }
         }
     }

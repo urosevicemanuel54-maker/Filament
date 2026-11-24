@@ -40,9 +40,11 @@ Filament is not a `WKWebView` pointed at instagram.com with CSS hidden:
   `WKWebView` that executes `fetch()` inside Instagram's own page origin, so real
   cookies, CSRF tokens and anti-abuse headers attach automatically. Responses are
   mapped to native models and rendered entirely in SwiftUI.
-- **Writes** (likes, comments, DMs) go through Instagram's private API first —
-  no page load, no visible browser. If Instagram refuses a write, falling back
-  to driving its real UI in a hidden webview keeps the action working.
+- **Writes** (likes, comments) are driven through Instagram's own web UI in a
+  hidden webview — an action it trusts, and one the user never sees. The raw
+  write endpoints are only a last resort: they carry none of the integrity
+  tokens its page JavaScript attaches, and being flagged for them applies to
+  every endpoint, not just the write.
 - **Login** uses a plain `WKWebView` showing Instagram's genuine page, so
   credentials and 2FA never touch native code.
 - **Messages and Profile are native**: the inbox, threads, message bubbles and
@@ -115,7 +117,7 @@ tapping Retry.
 | Feed | Native | Chronological, cursor-paginated, like/comment/share, no ranking or injected ads. |
 | Stories | Native | Tray + fullscreen player: progress bars, tap-to-advance, hold-to-pause, swipe-to-dismiss, video via AVKit. |
 | Comments | Native | Read from the API; posting goes through the same API-first path. |
-| Messages | Native | Inbox, threads, bubbles and a composer over `direct_v2`; 6s polling while a thread is open. |
+| Messages | Native | Inbox, threads, bubbles and a composer over `direct_v2`; 20s polling while a thread is open. |
 | Profile | Native | Header with counts, bio and the post grid, paginated. |
 | Authentication | Complete | Real Instagram login page in-app; credentials never touch native code. |
 

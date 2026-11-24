@@ -31,9 +31,8 @@ final class WebActionBridge: NSObject, ObservableObject {
         config.allowsInlineMediaPlayback = true
         self.webView = WKWebView(frame: .zero, configuration: config)
         super.init()
-        // Same identity as the login/API bridge so the action isn't seen as a
-        // different client (see IGIdentity).
-        self.webView.customUserAgent = IGIdentity.desktopUserAgent
+        // Same identity as the login/API bridge (see IGIdentity).
+        self.webView.customUserAgent = IGIdentity.userAgent
         self.webView.navigationDelegate = self
     }
 

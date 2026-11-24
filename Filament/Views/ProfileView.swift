@@ -57,6 +57,10 @@ struct ProfileView: View {
             .task {
                 if profile == nil { await load() }
             }
+            .onReceive(session.$isAuthenticated) { authenticated in
+                guard !authenticated else { return }
+                errorMessage = nil
+            }
             .onReceive(governor.cooldownEnded) { _ in
                 // Nothing on screen to keep: the block just lifted, so fetch.
                 guard profile == nil else { return }

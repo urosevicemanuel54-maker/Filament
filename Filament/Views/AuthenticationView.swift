@@ -28,9 +28,9 @@ private struct LoginWebView: UIViewRepresentable {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()
         let webView = WKWebView(frame: .zero, configuration: config)
-        // Mint the session under the SAME identity the bridge uses for writes,
-        // else IG flags likes as session hijacking and logs us out.
-        webView.customUserAgent = IGIdentity.desktopUserAgent
+        // Mint the session under the SAME identity the bridge uses (see
+        // IGIdentity) — an identity mismatch is what gets a session revoked.
+        webView.customUserAgent = IGIdentity.userAgent
         webView.navigationDelegate = context.coordinator
         webView.load(URLRequest(url: URL(string: "https://www.instagram.com/accounts/login/")!))
         return webView

@@ -14,14 +14,19 @@ import Combine
 import WebKit
 import UIKit
 
-/// One shared web identity. The login webview AND the bridge must present the
-/// SAME User-Agent: the session is minted at login and used for writes (likes)
-/// by the bridge — if those identities differ, IG treats a like as session
-/// hijacking and invalidates the session. Desktop UA is required for the
-/// `/api/v1/media/*` write endpoints (mobile UA → "useragent mismatch").
+/// One web identity: the login webview, the bridge and the action webview must
+/// all present the SAME User-Agent, or Instagram treats a request as a
+/// different client and revokes the session.
+///
+/// That identity is now **WKWebView's own** — deliberately no override. We used
+/// to claim a macOS Safari 17 UA from an iPhone, which is precisely the
+/// mismatch Instagram's anti-fraud looks for: the TLS and HTTP/2 stack is the
+/// device's real iOS one while the header says desktop Mac. Sessions minted
+/// under it get revoked a few requests later, which is the "signed us out"
+/// state this app kept landing in. Leaving `customUserAgent` nil makes the UA
+/// agree with the stack that actually sent the bytes.
 enum IGIdentity {
-    static let desktopUserAgent =
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+    static let userAgent: String? = nil
 }
 
 enum BridgeError: LocalizedError {
@@ -39,7 +44,7 @@ enum BridgeError: LocalizedError {
         case .badResponse:      return "Couldn't read Instagram's response."
         case .challengeRequired:return "Instagram needs you to verify your account. Open Messages or Profile to finish the check."
         case .rateLimited:      return "Instagram asked us to slow down. Filament has stopped sending requests until the block clears."
-        case .sessionExpired:   return "Instagram signed us out (this can happen after several quick actions). Reopen the app or log in again."
+        case .sessionExpired:   return "Instagram ended this session. Signing you back in…"
         case .httpStatus(let c, let d):
             return d.isEmpty ? "Instagram returned an error (\(c))." : "Instagram error \(c): \(d)"
         case .jsFailed(let m):  return "Bridge error: \(m)"
@@ -87,9 +92,9 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
         self.webView = WKWebView(frame: .zero, configuration: config)
         super.init()
         self.webView.navigationDelegate = self
-        // Must match the login webview's UA (see IGIdentity) so writes come from
-        // the same identity the session was minted under.
-        self.webView.customUserAgent = IGIdentity.desktopUserAgent
+        // Must match the login webview's UA (see IGIdentity) so requests come
+        // from the same identity the session was minted under.
+        self.webView.customUserAgent = IGIdentity.userAgent
     }
 
     // MARK: - Lifecycle
@@ -221,6 +226,17 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
     func invalidateCache() {
         cachedMe = nil
         ResponseCache.shared.removeAll()
+    }
+
+    /// Start over on a fresh session: reload the hidden page so it picks up the
+    /// cookies the user just minted, and drop everything tied to the old one.
+    func resetConnection() {
+        lastFailure = nil
+        invalidateCache()
+        guard didStart else { return }
+        isReady = false
+        readySignaled = false
+        webView.reload()
     }
 
     func currentUsername() async throws -> String {
@@ -458,7 +474,10 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
         // error downstream) and re-check whether we're still authenticated.
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if trimmed.hasPrefix("<") || text.contains("not-logged-in") || text.contains("\"require_login\"") {
-            await SessionManager.shared.refresh()
+            // The cookie is still on disk but the server has disowned it. That
+            // is not something Retry can fix, so hand the user back to the
+            // login screen instead of leaving a dead error on three tabs.
+            await SessionManager.shared.sessionRejected()
             throw BridgeError.sessionExpired
         }
         // Keep it: to answer the next repeat request inside its TTL, and as the
