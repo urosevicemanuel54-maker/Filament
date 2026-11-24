@@ -1,88 +1,152 @@
-# Strand
+# Filament
 
-Instagram's default experience has become a tangled web, engineered to maximize your time-in-app via algorithmic recommendation surfaces and endless discovery feeds. Meta brought us Instagram and Threads- an infinite spool of content designed to keep people scrolling.
+One deliberate strand of your feed.
 
-Introducing Strand.
+Filament is a native iOS Instagram client with the algorithmic surface removed:
+no Explore, no Reels, no suggested posts, no engagement bait — a chronological
+feed of the people you follow, rendered in SwiftUI, with a Rust core doing the
+JSON work.
 
-A single, deliberate strand pulled free of noise- one single, chronological feed of the people you follow. No algorithmic recommendations. No suggested posts. No Explore tab. No notification badges designed to interrupt you. *No dopamine hijacking.* Strand is a minimalist, native iOS client that shows you exactly what the people you care about actually posted- nothing more, nothing less. By cutting away the engagement bait that has vitiated social media's original mission, it restores the true focus of social media: genuine connection with the people you care about.
+It is a fork of [Strand](https://github.com/ericssonl07/instagram-strand) by
+Ericsson Lin (GPL-3.0), rebranded as its own client and reworked for speed.
 
-Fast. Calm. Deliberate.
+## What changed from upstream
 
-## 🛠 How it works
+**Its own client.** Renamed throughout: the Xcode project and target are
+`Filament`, the bundle id is `com.filament.client`, the app struct is
+`FilamentApp`, and the upstream author's development team id and stale
+`xcuserdata` were dropped.
 
-Strand isn't a `WKWebView` pointed at instagram.com with some CSS hidden. It's a hybrid architecture:
+**A Rust core for the hot path.** The one genuinely hot unit — turning
+Instagram's JSON into models on the main actor for every feed page, tray, story
+and comments load — is ported to Rust in `rust/filament-core`. Rust parses the
+response, drops ads and suggested blocks, picks image candidates, and returns a
+flat pre-filtered document that Swift decodes in one cheap pass instead of
+walking Instagram's whole nested DTO tree.
 
-- **Reads (feed, stories, comments, profile data)** go through a hidden, logged-in `WKWebView` that executes `fetch()` calls against Instagram's own private API from within IG's page origin- real cookies, real CSRF tokens, real anti-abuse headers, captured live from the authenticated session. The results are parsed into native Swift models and rendered entirely in SwiftUI.
-- **Writes (likes, comments)** deliberately avoid raw API calls, which lack the integrity tokens needed to survive Instagram's abuse detection. Instead, a second hidden webview drives Instagram's real UI directly- clicking the actual like button, typing into the actual comment box- so the write looks (and is) identical to using instagram.com.
-- **Login, DMs, and your own profile** use a third pattern: a path-locked, visible `WKWebView` showing Instagram's genuine UI, restricted with a JS sentry to only the routes it's meant for (e.g. `/direct/` for messages), and hardened to block things like the Reels carousel from sneaking in through an inbox.
+**Caching that was missing.** `URLCache.shared` is given 64 MB memory / 512 MB
+disk at launch; the default 512 KB is why re-scrolled photos downloaded again.
+`ImagePrefetcher` warms the cache for each newly loaded page (skipped on
+cellular and in Low Data Mode).
 
-The result: no scraping fragility, no fabricated fingerprints, and no visible "this is secretly a browser" seams- while every pixel you interact with day-to-day (feed, stories, comments) is fully native.
+See `RUST-PORT.md` for the profiling, the port plan, the recorded cases and the
+gate — including what still needs a Mac.
 
-## ✨ Features
+## How it works
+
+Filament is not a `WKWebView` pointed at instagram.com with CSS hidden:
+
+- **Reads** (feed, stories, comments, profile data) come from a hidden, logged-in
+  `WKWebView` that executes `fetch()` inside Instagram's own page origin, so real
+  cookies, CSRF tokens and anti-abuse headers attach automatically. Responses are
+  mapped to native models and rendered entirely in SwiftUI.
+- **Writes** (likes, comments) drive Instagram's real UI in a second hidden
+  webview — clicking the actual button, typing into the actual box — because raw
+  write calls lack the integrity tokens Instagram expects.
+- **Login, DMs and your own profile** use a path-locked, visible `WKWebView`
+  showing Instagram's genuine UI, restricted by a JS sentry to the routes it is
+  meant for.
+
+## Features
 
 | Area | Status | Notes |
 |---|---|---|
-| Feed | Native, complete | Chronological, cursor-paginated, like/comment/share, no algorithmic ranking or injected ads. |
-| Stories | Native, complete | Horizontal tray + fullscreen player (progress bars, tap-to-advance, hold-to-pause, swipe-to-dismiss, video via AVKit). |
-| Comments | Native, nonfunctional (todo) | Currently fails to find the underlying text field and does not send a comment. Fails gracefully. |
-| Messages | Functional | Constrained webview onto Instagram's real DM UI. Reels sent from DMs may be viewed without the ability to scroll beyond the initial page. |
-| Profile | To be implemented | Constrained webview + native logout. Currently "couldn't load profile." |
+| Feed | Native | Chronological, cursor-paginated, like/comment/share, no ranking or injected ads. |
+| Stories | Native | Tray + fullscreen player: progress bars, tap-to-advance, hold-to-pause, swipe-to-dismiss, video via AVKit. |
+| Comments | Native, read | Reading works; posting goes through the web-UI bridge and still needs work, as upstream. |
+| Messages | Functional | Constrained webview onto Instagram's real DM UI. |
+| Profile | To be implemented | Constrained webview + native logout. |
 | Authentication | Complete | Real Instagram login page in-app; credentials never touch native code. |
 
-Deliberately absent: **Reels, Explore, and Suggested Posts**- features that Strand exists to remove.
+Deliberately absent: Reels, Explore, Suggested Posts.
 
-## 🗺 Roadmap
+## Building an IPA
 
-Functional Fixes and Improvements
-- *Fix viewership*: Stories and posts are currently marked as unviewed on the backend unless interacted with via a native like.
-- *Fix commenting*: Properly bridge the native text input to the underlying Instagram web comment UI.
-- *Implement profile*: Investigate and patch the routing logic causing the "couldn't load profile" error in the constrained webview.
-
-User Experience Improvement Features
-- *Optimize anti-bot performance*: Current write actions rely on random artificial delays to evade bot detection, slowing down the app. This will be replaced with more sophisticated, performant human-mimicry interactions.
-- *Construct native DM interface*: Build a fully native Direct Messaging interface to replace the constrained webview bridge- an aesthetics/UX improvement.
-
-## 📂 Architecture
+`.github/workflows/ios-ipa.yml` builds the app for a real device on a
+`macos-26` runner and publishes the result as a release asset, so there is a
+stable download link:
 
 ```
-strand/
-├── strandApp.swift              App entry point
-├── ContentView.swift            Root: Auth vs. Main tab switch
-├── Managers/
-│   ├── SessionManager.swift     Auth state via sessionid cookie
-│   ├── InstagramAPIBridge.swift Hidden webview → private API reads
-│   └── WebActionBridge.swift    Hidden webview → real-UI writes (like/comment)
-├── Models/
-│   └── Post.swift               Domain models + raw IG DTO mapping/filtering
-└── Views/
-    ├── MainTabView.swift              Feed / Messages / Profile tab shell
-    ├── FeedView.swift                 Native feed + comments sheet
-    ├── StoriesView.swift              Native story tray
-    ├── StoryPlayerView.swift          Native fullscreen story player
-    ├── MessagesView.swift             DMs (constrained webview)
-    ├── ProfileView.swift              Profile (constrained webview)
-    ├── AuthenticationView.swift       Login flow
-    └── ConstrainedInstagramWebView.swift  Path-locked webview w/ JS watchdog
+https://github.com/<owner>/Filament/releases/download/latest-build/Filament-unsigned.ipa
 ```
+
+It runs on every push to `main`, on `v*` tags, and on demand from the Actions
+tab. The same file is also attached to the run as an artifact.
+
+**The default IPA is unsigned.** It cannot be installed on a stock iPhone as-is:
+re-sign it with your own Apple ID using Sideloadly, AltStore or ESign (free
+accounts need to re-sign every 7 days). That is the trade-off of building
+without an Apple Developer account in CI.
+
+To get a signed IPA instead, add these repository secrets
+(Settings → Secrets and variables → Actions) and the workflow switches to an
+archive/export build automatically:
+
+| Secret | Value |
+|---|---|
+| `BUILD_CERTIFICATE_BASE64` | your `.p12` signing certificate, base64 encoded |
+| `P12_PASSWORD` | the `.p12` password |
+| `PROVISIONING_PROFILE_BASE64` | the `.mobileprovision`, base64 encoded |
+| `TEAM_ID` | your Apple Developer team id |
+| `EXPORT_METHOD` | optional: `ad-hoc` (default), `development`, `app-store` |
+
+The same workflow also runs the Rust core's tests (`cargo test` in
+`rust/filament-core`), which is the gate `RUST-PORT.md` refers to.
 
 ## Requirements
 
-- Xcode with iOS 26 SDK
-- Swift 5
-- An Instagram account (login is interactive, in-app- no credentials or API keys are stored in the project)
+
+- Xcode with the iOS 26 SDK, Swift 5
+- An Instagram account (login is interactive, in-app — no credentials or API keys
+  live in the project)
+- Optional: Rust and `rust/filament-core/build-ios.sh` for the Rust decode path
 
 ## Getting started
 
-1. Open `strand.xcodeproj` in Xcode.
-2. Select a simulator or device and run.
-3. Log in with your Instagram account when prompted.
+1. Open `Filament.xcodeproj`, pick a simulator or device, and run.
+2. Log in with your Instagram account.
+
+The app builds and runs with no Rust toolchain: `Filament/Managers/FastDecode.swift`
+selects the Rust backend only when `FilamentCore.xcframework` is in the project
+(`#if canImport(FilamentCore)`), and otherwise uses the Swift reference
+implementation of the same mapping.
+
+## Architecture
+
+```
+Filament/
+├── FilamentApp.swift             App entry point, shared URLCache budgets
+├── ContentView.swift             Root: auth vs. main
+├── Managers/
+│   ├── SessionManager.swift      Auth state via sessionid cookie
+│   ├── InstagramAPIBridge.swift  Hidden webview → private API reads
+│   ├── WebActionBridge.swift     Hidden webview → real-UI writes
+│   ├── FastDecode.swift          JSON → models; Swift and Rust backends
+│   └── ImagePrefetcher.swift     Cache warming for the next page
+├── Models/
+│   └── Post.swift                Domain models + IG DTOs + the reference mapping
+└── Views/
+    ├── MainTabView.swift, FeedView.swift, StoriesView.swift,
+    ├── StoryPlayerView.swift, MessagesView.swift, ProfileView.swift,
+    ├── AuthenticationView.swift, ConstrainedInstagramWebView.swift
+rust/filament-core/               Rust port of the mapping, C ABI, recorded cases
+```
+
+## Roadmap
+
+- Run the Rust gate on a Mac (`cargo test`, `clippy`, `bench`, then shadow-diff
+  both backends on real payloads) and ship the framework with the app.
+- Move the decode off the main actor once the Rust path is the default.
+- Fix comment posting and the profile view (both inherited from upstream).
+- Native DM interface.
 
 ## ⚠️ Disclaimer
 
-Strand relies on Instagram's private, undocumented API and is not affiliated with, endorsed by, or supported by Instagram or Meta. Use at your own risk- Instagram's API and anti-automation measures may change at any time.
+Filament relies on Instagram's private, undocumented API and is not affiliated
+with, endorsed by, or supported by Instagram or Meta. Use at your own risk —
+Instagram's API and anti-automation measures may change at any time.
 
-## A note on how this was built
+## License
 
-The product problem and the constraints came from my own experience- existing "Instagram blocker" apps are web wrappers with features crudely stripped out, and they feel sluggish; I wanted something that felt genuinely native.
-
-I'm not a web developer or iOS specialist- my primary programming proficiencies are in C++ and Python. Therefore, the technical specification and execution was done through AI-assisted development, with me directing scope, continuously testing with a real account, and diagnosing/proposing root causes (e.g. tracing a broken scroll-lock to a CSS/JS distinction- disabling scroll in CSS doesn't stop a carousel's own scroll-driving JS).
+GPL-3.0, inherited from [Strand](https://github.com/ericssonl07/instagram-strand).
+See `LICENSE.txt`.

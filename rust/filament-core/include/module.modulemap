@@ -1,0 +1,4 @@
+module FilamentCore {
+    header "filament_core.h"
+    export *
+}
