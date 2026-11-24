@@ -66,12 +66,11 @@ Deliberately absent: Reels, Explore, Suggested Posts.
 `macos-26` runner and publishes the result as a release asset, so there is a
 stable download link:
 
-```
-https://github.com/<owner>/Filament/releases/download/latest-build/Filament-unsigned.ipa
-```
+**https://github.com/urosevicemanuel54-maker/Filament/releases/download/latest-build/Filament-unsigned.ipa**
 
-It runs on every push to `main`, on `v*` tags, and on demand from the Actions
-tab. The same file is also attached to the run as an artifact.
+The link always serves the newest successful build. It runs on every push to
+`main`, on `v*` tags, and on demand from the Actions tab; the same file is also
+attached to the run as an artifact.
 
 **The default IPA is unsigned.** It cannot be installed on a stock iPhone as-is:
 re-sign it with your own Apple ID using Sideloadly, AltStore or ESign (free

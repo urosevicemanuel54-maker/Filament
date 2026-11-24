@@ -17,8 +17,11 @@ device**:
   done by hand: units chosen by reading the code, recorded cases written as
   fixtures, and the gate's rules applied by inspection.
 
-So the crate is a hand-built port with the same contract, and everything that
-needs a compiler is listed at the end for a Mac.
+So the crate is a hand-built port with the same contract: units were chosen by
+reading the code, and the recorded cases were written as fixtures. The cases
+themselves are not taken on trust — they run in CI on every push (`cargo test`,
+the `rust-core` job in `.github/workflows/ios-ipa.yml`). What still needs a Mac
+is listed at the end.
 
 ## Plan: what is worth moving
 
@@ -90,7 +93,9 @@ Both are deliberate, and both only show up on data Instagram does not send:
 
 ## Gate
 
-Applied by inspection, since nothing here compiles on this device:
+`cargo test` runs on every push in CI (`.github/workflows/ios-ipa.yml`, the
+`rust-core` job) and passes: every recorded case above matches. Applied by
+inspection, since the rest needs a full toolchain:
 
 - no `unwrap` / `expect` / `panic!` in the mapping functions — every fallible
   path returns `Option` and the ABI turns `None` into a null pointer;
@@ -99,8 +104,8 @@ Applied by inspection, since nothing here compiles on this device:
 - no `unimplemented!`, no placeholder paths;
 - every rule the Swift implementation enforces has a recorded case above.
 
-Not checked: `cargo fmt`, `clippy -D warnings`, `cargo test`, `diff` (N/N
-against recorded cases), `bench` (original vs Rust).
+Not checked yet: `cargo fmt`, `clippy -D warnings`, `bench` (original vs Rust),
+and the shadow diff below.
 
 ## On a Mac
 
