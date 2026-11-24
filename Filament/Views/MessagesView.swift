@@ -42,6 +42,12 @@ struct MessagesView: View {
                 if threads.isEmpty { await load() }
             }
             .refreshable { await load() }
+            .onReceive(governor.cooldownEnded) { _ in
+                // The block lifted on its own: reload rather than leave the user
+                // staring at Retry.
+                guard threads.isEmpty else { return }
+                Task { await load() }
+            }
             .sheet(isPresented: $showWebFallback) {
                 webFallback
             }

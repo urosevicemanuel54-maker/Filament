@@ -90,6 +90,11 @@ struct FeedView: View {
         }
         .refreshable { await model.loadInitial() }
         .task { if model.posts.isEmpty { await model.loadInitial() } }
+        .onReceive(governor.cooldownEnded) { _ in
+            // The block lifted on its own: fill the empty feed back in.
+            guard model.posts.isEmpty else { return }
+            Task { await model.loadInitial() }
+        }
     }
 
     @ViewBuilder

@@ -6,6 +6,7 @@
 //  header with counts, then the post grid.
 //
 
+import Combine
 import SwiftUI
 
 struct ProfileView: View {
@@ -55,6 +56,11 @@ struct ProfileView: View {
             }
             .task {
                 if profile == nil { await load() }
+            }
+            .onReceive(governor.cooldownEnded) { _ in
+                // Nothing on screen to keep: the block just lifted, so fetch.
+                guard profile == nil else { return }
+                Task { await load() }
             }
         }
     }
@@ -189,11 +195,14 @@ struct ProfileView: View {
         errorMessage = nil
         do {
             let me = try await InstagramAPIBridge.shared.currentUser()
-            let page = try await InstagramAPIBridge.shared.userPosts(userID: me.id, maxId: nil)
-            profile = try await InstagramAPIBridge.shared.profile(of: me)
-            posts = page.posts
-            nextMaxId = page.nextMaxId
-            hasMore = page.moreAvailable
+            // One request for the header and the first grid page, on the
+            // endpoint the web client uses; the bridge falls back to the older
+            // pair if that one is refused.
+            let snapshot = try await InstagramAPIBridge.shared.profileSnapshot(username: me.username)
+            profile = snapshot.profile
+            posts = snapshot.page.posts
+            nextMaxId = snapshot.page.nextMaxId
+            hasMore = snapshot.page.moreAvailable
             ImagePrefetcher.shared.prefetch(posts.prefix(6).compactMap { $0.imageURLs.first })
         } catch {
             // Whatever loaded stays on screen; the header only shows the error

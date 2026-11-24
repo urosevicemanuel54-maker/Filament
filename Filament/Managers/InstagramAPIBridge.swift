@@ -54,6 +54,11 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
 
     @Published private(set) var isReady = false
 
+    /// What Instagram actually answered the last time a request failed, verbatim
+    /// enough to act on. Negative states show it, so a report can say which
+    /// endpoint and status instead of "it says slow down".
+    @Published private(set) var lastFailure: String?
+
     private let webView: WKWebView
     private var didStart = false
     private var readySignaled = false
@@ -181,6 +186,24 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
     }
 
     func storyItems(for story: Story) async throws -> [StoryItem] {
+        // `/feed/user/{pk}/story/` is the old path and is routinely refused now.
+        // The web story viewer asks `/feed/reels_media/` — the same family as
+        // `reels_tray`, which still answers — so try that first.
+        do {
+            let text = try await callAPI(path: "/api/v1/feed/reels_media/?reel_ids=\(story.author.id)",
+                                         method: "GET", ttl: 60)
+            let items = try SwiftModelDecoder.reelsMedia(from: text)
+            if !items.isEmpty { return items }
+        } catch BridgeError.rateLimited {
+            throw BridgeError.rateLimited
+        } catch BridgeError.challengeRequired {
+            throw BridgeError.challengeRequired
+        } catch BridgeError.sessionExpired {
+            throw BridgeError.sessionExpired
+        } catch {
+            // Fall through to the older endpoint below.
+        }
+
         let text = try await callAPI(path: "/api/v1/feed/user/\(story.author.id)/story/", method: "GET", ttl: 60)
         return try ModelDecoder.story(from: text)
     }
@@ -206,32 +229,27 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
 
     // MARK: - Writes (API first, Instagram's own UI as the fallback)
 
-    /// Set the like state. The private API is the fast path; if Instagram
-    /// refuses the write, driving its real web UI is the reliable one.
+    /// Set the like state.
+    ///
+    /// Instagram's raw write endpoints carry none of the integrity tokens its
+    /// page JS attaches, and writing through them is the classic way an account
+    /// gets put on `feedback_required` for everything else too. Clicking its own
+    /// like button in a hidden webview is an action it trusts — and the user
+    /// never sees it, so the cost is a few hundred ms, not a browser.
     func setLike(_ liked: Bool, on post: Post) async throws {
         do {
+            try await WebActionBridge.shared.like(post: post, unlike: !liked)
+        } catch {
             try await like(post: post, unlike: !liked)
-        } catch let error as BridgeError {
-            switch error {
-            case .challengeRequired, .rateLimited, .sessionExpired:
-                throw error
-            default:
-                try await WebActionBridge.shared.like(post: post, unlike: !liked)
-            }
         }
     }
 
-    /// Post a comment, same fallback ladder as likes.
+    /// Post a comment, same ladder: Instagram's own UI first, raw endpoint after.
     func postComment(on post: Post, text: String) async throws {
         do {
+            try await WebActionBridge.shared.comment(on: post, text: text)
+        } catch {
             try await addComment(to: post, text: text)
-        } catch let error as BridgeError {
-            switch error {
-            case .challengeRequired, .rateLimited, .sessionExpired:
-                throw error
-            default:
-                try await WebActionBridge.shared.comment(on: post, text: text)
-            }
         }
     }
 
@@ -240,6 +258,28 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
     func profile(of user: User) async throws -> UserProfile {
         let text = try await callAPI(path: "/api/v1/users/\(user.id)/info/", method: "GET", ttl: 300)
         return try ProfileDecoder.profile(from: text)
+    }
+
+    /// A profile header and the first grid page, preferring the endpoint the web
+    /// client uses (one request, and not one of the ones being refused), and
+    /// falling back to the older two-call pair.
+    func profileSnapshot(username: String) async throws -> ProfileSnapshot {
+        do {
+            let text = try await callAPI(path: "/api/v1/users/web_profile_info/?username=\(username)",
+                                         method: "GET", ttl: 240)
+            return try ProfileDecoder.snapshot(from: text)
+        } catch BridgeError.rateLimited {
+            throw BridgeError.rateLimited
+        } catch BridgeError.challengeRequired {
+            throw BridgeError.challengeRequired
+        } catch BridgeError.sessionExpired {
+            throw BridgeError.sessionExpired
+        } catch {
+            let me = try await currentUser()
+            let page = try await userPosts(userID: me.id, maxId: nil)
+            let profile = try await profile(of: me)
+            return ProfileSnapshot(profile: profile, page: page)
+        }
     }
 
     func userPosts(userID: String, maxId: String?) async throws -> ProfileFeedPage {
@@ -254,7 +294,7 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
     func inbox() async throws -> [DirectThread] {
         let me = try await currentUser()
         let text = try await callAPI(
-            path: "/api/v1/direct_v2/inbox/?use_unified_inbox=true&persistentBadging=true",
+            path: "/api/v1/direct_v2/inbox/?folder=0&limit=20&thread_message_limit=10&persistentBadging=true&use_unified_inbox=true",
             method: "GET", ttl: 45)
         return try DirectDecoder.threads(from: text, meID: me.id)
     }
@@ -391,17 +431,26 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
         }
 
         // Anti-detection back-off: surface challenges/rate limits, never retry.
+        // Each failure keeps a verbatim record so the error states can show what
+        // Instagram actually said instead of a guess.
+        func note(_ kind: String) {
+            lastFailure = "\(kind) · \(method) \(path) · HTTP \(status) · \(Self.snippet(text))"
+        }
+
         if text.contains("challenge_required") || text.contains("checkpoint_required") {
+            note("challenge")
             throw BridgeError.challengeRequired
         }
         if status == 429 || text.contains("feedback_required")
             || text.contains("please wait a few minutes") {
             // Start the cooldown BEFORE throwing, so every other screen stops
             // sending on its own instead of adding to the pile.
+            note("rate limited")
             RequestGovernor.shared.registerRateLimit()
             throw BridgeError.rateLimited
         }
         guard (200..<300).contains(status) else {
+            note("HTTP \(status)")
             throw BridgeError.httpStatus(status, Self.message(from: text))
         }
         // 2xx but the body is HTML, not API JSON ⇒ IG served a logged-out /
@@ -416,7 +465,16 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
         // fallback for the next time Instagram blocks us.
         ResponseCache.shared.store(text, for: key)
         RequestGovernor.shared.registerSuccess()
+        if lastFailure != nil { lastFailure = nil }
         return text
+    }
+
+    /// One collapsed line of a response body, for the diagnostics note.
+    private static func snippet(_ text: String) -> String {
+        let collapsed = text
+            .replacingOccurrences(of: "\n", with: " ")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return collapsed.count > 180 ? String(collapsed.prefix(180)) + "…" : collapsed
     }
 
     /// Pull IG's human-readable error out of a JSON body for diagnosis, else a snippet.

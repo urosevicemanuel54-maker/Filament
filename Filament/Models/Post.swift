@@ -178,6 +178,23 @@ struct IGComment: Decodable {
 struct IGUserStoryResponse: Decodable { let reel: IGReel? }
 struct IGReel: Decodable { let items: [IGStoryItem]? }
 
+/// `/api/v1/feed/reels_media/` — what the web story viewer actually asks for,
+/// in the same family as `reels_tray`. It answers with the reels keyed by pk
+/// (or as an array, depending on the rollout).
+struct IGReelsMediaResponse: Decodable {
+    let reels: [String: IGReel]?
+    let reelsMedia: [IGReel]?
+
+    enum CodingKeys: String, CodingKey {
+        case reels
+        case reelsMedia = "reels_media"
+    }
+
+    var allReels: [IGReel] {
+        (reelsMedia ?? []) + (reels?.values.map { $0 } ?? [])
+    }
+}
+
 struct IGStoryItem: Decodable {
     let pk: FlexibleString?
     let id: String?

@@ -31,6 +31,10 @@ final class RequestGovernor: ObservableObject {
     /// back-off ladder and the pacing between calls.
     @Published private(set) var strikes: Int
 
+    /// Fires the moment a cooldown runs out. Screens with nothing to show use it
+    /// to reload themselves, so the app heals without anyone tapping Retry.
+    let cooldownEnded = PassthroughSubject<Void, Never>()
+
     private let defaults = UserDefaults.standard
     private let cooldownKey = "filament.governor.cooldownUntil"
     private let strikesKey = "filament.governor.strikes"
@@ -114,6 +118,7 @@ final class RequestGovernor: ObservableObject {
             guard !Task.isCancelled, let self else { return }
             self.cooldownEndsAt = nil
             self.defaults.removeObject(forKey: self.cooldownKey)
+            self.cooldownEnded.send()
         }
     }
 }

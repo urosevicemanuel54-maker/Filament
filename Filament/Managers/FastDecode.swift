@@ -48,6 +48,11 @@ enum SwiftModelDecoder {
         return (resp.reel?.items ?? []).compactMap(StoryItem.init(raw:))
     }
 
+    static func reelsMedia(from text: String) throws -> [StoryItem] {
+        let resp = try decodeJSON(IGReelsMediaResponse.self, from: text)
+        return resp.allReels.flatMap { ($0.items ?? []).compactMap(StoryItem.init(raw:)) }
+    }
+
     static func currentUser(from text: String) throws -> User {
         let resp = try decodeJSON(IGCurrentUserResponse.self, from: text)
         guard let raw = resp.user else { throw BridgeError.badResponse }

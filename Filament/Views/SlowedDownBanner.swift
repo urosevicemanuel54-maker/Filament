@@ -10,6 +10,7 @@ import SwiftUI
 
 struct SlowedDownBanner: View {
     @ObservedObject private var governor = RequestGovernor.shared
+    @ObservedObject private var bridge = InstagramAPIBridge.shared
 
     /// Called when the retry button is tapped. Omit for a read-only banner.
     var onRetry: (() -> Void)?
@@ -32,6 +33,16 @@ struct SlowedDownBanner: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .fixedSize(horizontal: false, vertical: true)
+
+                    // What Instagram actually answered — the difference between
+                    // "it still says slow down" and a fix.
+                    if let lastFailure = bridge.lastFailure {
+                        Text(lastFailure)
+                            .font(.caption2.monospaced())
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(2)
+                            .padding(.top, 2)
+                    }
                 }
 
                 Spacer(minLength: 0)
