@@ -40,12 +40,15 @@ Filament is not a `WKWebView` pointed at instagram.com with CSS hidden:
   `WKWebView` that executes `fetch()` inside Instagram's own page origin, so real
   cookies, CSRF tokens and anti-abuse headers attach automatically. Responses are
   mapped to native models and rendered entirely in SwiftUI.
-- **Writes** (likes, comments) drive Instagram's real UI in a second hidden
-  webview — clicking the actual button, typing into the actual box — because raw
-  write calls lack the integrity tokens Instagram expects.
-- **Login, DMs and your own profile** use a path-locked, visible `WKWebView`
-  showing Instagram's genuine UI, restricted by a JS sentry to the routes it is
-  meant for.
+- **Writes** (likes, comments, DMs) go through Instagram's private API first —
+  no page load, no visible browser. If Instagram refuses a write, falling back
+  to driving its real UI in a hidden webview keeps the action working.
+- **Login** uses a plain `WKWebView` showing Instagram's genuine page, so
+  credentials and 2FA never touch native code.
+- **Messages and Profile are native**: the inbox, threads, message bubbles and
+  composer, and the profile header, counts and post grid are all SwiftUI fed by
+  `direct_v2` and `/users/{pk}/info/`. Instagram's web DM UI is reachable only
+  from the Messages error state, as a fallback.
 
 ## Features
 
@@ -53,9 +56,9 @@ Filament is not a `WKWebView` pointed at instagram.com with CSS hidden:
 |---|---|---|
 | Feed | Native | Chronological, cursor-paginated, like/comment/share, no ranking or injected ads. |
 | Stories | Native | Tray + fullscreen player: progress bars, tap-to-advance, hold-to-pause, swipe-to-dismiss, video via AVKit. |
-| Comments | Native, read | Reading works; posting goes through the web-UI bridge and still needs work, as upstream. |
-| Messages | Functional | Constrained webview onto Instagram's real DM UI. |
-| Profile | To be implemented | Constrained webview + native logout. |
+| Comments | Native | Read from the API; posting goes through the same API-first path. |
+| Messages | Native | Inbox, threads, bubbles and a composer over `direct_v2`; 6s polling while a thread is open. |
+| Profile | Native | Header with counts, bio and the post grid, paginated. |
 | Authentication | Complete | Real Instagram login page in-app; credentials never touch native code. |
 
 Deliberately absent: Reels, Explore, Suggested Posts.
@@ -123,7 +126,9 @@ Filament/
 │   ├── FastDecode.swift          JSON → models; Swift and Rust backends
 │   └── ImagePrefetcher.swift     Cache warming for the next page
 ├── Models/
-│   └── Post.swift                Domain models + IG DTOs + the reference mapping
+│   ├── Post.swift                Domain models + IG DTOs + the reference mapping
+│   ├── Direct.swift              Inbox/thread DTOs → DM models
+│   └── Profile.swift             Profile info + user feed → grid
 └── Views/
     ├── MainTabView.swift, FeedView.swift, StoriesView.swift,
     ├── StoryPlayerView.swift, MessagesView.swift, ProfileView.swift,
@@ -136,8 +141,8 @@ rust/filament-core/               Rust port of the mapping, C ABI, recorded case
 - Run the Rust gate on a Mac (`cargo test`, `clippy`, `bench`, then shadow-diff
   both backends on real payloads) and ship the framework with the app.
 - Move the decode off the main actor once the Rust path is the default.
-- Fix comment posting and the profile view (both inherited from upstream).
-- Native DM interface.
+- Native post detail and viewer (the grid and feed currently show media only).
+- DM attachments and reactions; only text is rendered today.
 
 ## ⚠️ Disclaimer
 

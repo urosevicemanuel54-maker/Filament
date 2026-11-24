@@ -33,6 +33,7 @@ final class SessionManager: ObservableObject {
         let types = WKWebsiteDataStore.allWebsiteDataTypes()
         let records = await store.dataRecords(ofTypes: types)
         await store.removeData(ofTypes: types, for: records)
+        InstagramAPIBridge.shared.invalidateCache()
         isAuthenticated = false
     }
 }

@@ -219,9 +219,9 @@ struct PostView: View {
         liked = newLiked
         likeCount += newLiked ? 1 : -1
         do {
-            // Web-UI like (clicks IG's own button) — the raw API like invalidates
-            // the session, so we route likes through a genuine web action.
-            try await WebActionBridge.shared.like(post: post, unlike: !newLiked)
+            // Private API first; the web-UI bridge is only the fallback, so a
+            // like no longer costs a whole page load.
+            try await InstagramAPIBridge.shared.setLike(newLiked, on: post)
         } catch {
             // Revert optimistic update on failure — and surface why.
             liked = !newLiked
@@ -311,9 +311,8 @@ struct CommentsSheet: View {
         if let optimistic { comments.insert(optimistic, at: 0) }
         draft = ""
         do {
-            // Web-UI comment (types into IG's own box) — the raw API comment
-            // invalidates the session, same as likes did.
-            try await WebActionBridge.shared.comment(on: post, text: text)
+            // Private API first, web UI as the fallback.
+            try await InstagramAPIBridge.shared.postComment(on: post, text: text)
         } catch {
             if let optimistic { comments.removeAll { $0.id == optimistic.id } }
             self.error = error.localizedDescription

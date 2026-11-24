@@ -67,6 +67,10 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
     private let appID = "936619743392459"
     private let asbdID = "129477"
 
+    // The logged-in user, resolved once and kept for the session (profile, DMs
+    // and the comment composer all need it). Cleared on logout.
+    private var cachedMe: User?
+
     private override init() {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()          // shared cookies/login
@@ -150,7 +154,8 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
         // bridge presents a desktop UA, so the identity is consistent — the same
         // reason `/api/v1/feed/timeline/` works.
         let action = unlike ? "unlike" : "like"
-        let body = "media_id=\(post.id)"
+        // The write endpoints want the numeric media PK, not the composite id.
+        let body = "media_id=\(mediaPK(post.id))"
         _ = try await callAPI(path: "/api/v1/media/\(mediaPK(post.id))/\(action)/",
                               method: "POST", body: body, form: true)
     }
@@ -173,12 +178,91 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
     }
 
     func currentUser() async throws -> User {
+        if let cachedMe { return cachedMe }
         let text = try await callAPI(path: "/api/v1/accounts/current_user/", method: "GET")
-        return try ModelDecoder.currentUser(from: text)
+        let user = try ModelDecoder.currentUser(from: text)
+        cachedMe = user
+        return user
+    }
+
+    /// Forget the resolved account (logout, or a session that expired).
+    func invalidateCache() {
+        cachedMe = nil
     }
 
     func currentUsername() async throws -> String {
         try await currentUser().username
+    }
+
+    // MARK: - Writes (API first, Instagram's own UI as the fallback)
+
+    /// Set the like state. The private API is the fast path; if Instagram
+    /// refuses the write, driving its real web UI is the reliable one.
+    func setLike(_ liked: Bool, on post: Post) async throws {
+        do {
+            try await like(post: post, unlike: !liked)
+        } catch let error as BridgeError {
+            switch error {
+            case .challengeRequired, .rateLimited, .sessionExpired:
+                throw error
+            default:
+                try await WebActionBridge.shared.like(post: post, unlike: !liked)
+            }
+        }
+    }
+
+    /// Post a comment, same fallback ladder as likes.
+    func postComment(on post: Post, text: String) async throws {
+        do {
+            try await addComment(to: post, text: text)
+        } catch let error as BridgeError {
+            switch error {
+            case .challengeRequired, .rateLimited, .sessionExpired:
+                throw error
+            default:
+                try await WebActionBridge.shared.comment(on: post, text: text)
+            }
+        }
+    }
+
+    // MARK: - Profile
+
+    func profile(of user: User) async throws -> UserProfile {
+        let text = try await callAPI(path: "/api/v1/users/\(user.id)/info/", method: "GET")
+        return try ProfileDecoder.profile(from: text)
+    }
+
+    func userPosts(userID: String, maxId: String?) async throws -> ProfileFeedPage {
+        var path = "/api/v1/feed/user/\(userID)/?count=12"
+        if let maxId { path += "&max_id=\(maxId)" }
+        let text = try await callAPI(path: path, method: "GET")
+        return try ProfileDecoder.feed(from: text)
+    }
+
+    // MARK: - Direct messages
+
+    func inbox() async throws -> [DirectThread] {
+        let me = try await currentUser()
+        let text = try await callAPI(
+            path: "/api/v1/direct_v2/inbox/?use_unified_inbox=true&persistentBadging=true",
+            method: "GET")
+        return try DirectDecoder.threads(from: text, meID: me.id)
+    }
+
+    func thread(id: String, meID: String) async throws -> DirectThreadContent {
+        let text = try await callAPI(
+            path: "/api/v1/direct_v2/threads/\(id)/?use_unified_inbox=true",
+            method: "GET")
+        return try DirectDecoder.content(from: text, meID: meID)
+    }
+
+    func sendMessage(threadID: String, text: String) async throws {
+        let body = "action=send_item"
+            + "&thread_ids=[\(threadID)]"
+            + "&text=\(formEncode(text))"
+            + "&client_context=\(UUID().uuidString.lowercased())"
+        _ = try await callAPI(path: "/api/v1/direct_v2/threads/broadcast/text/",
+                              method: "POST", body: body, form: true)
     }
 
     // The like/comment endpoints want the numeric media PK, not IG's

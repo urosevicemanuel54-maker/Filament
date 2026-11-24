@@ -104,8 +104,8 @@ enum ModelDecoder {
 }
 
 /// Decode `text` into `T`, turning an unexpected body into a diagnosable bridge
-/// error instead of an opaque JSON error.
-private func decodeJSON<T: Decodable>(_ type: T.Type, from string: String) throws -> T {
+/// error instead of an opaque JSON error. Shared by every decoder in the app.
+func decodeJSON<T: Decodable>(_ type: T.Type, from string: String) throws -> T {
     guard let data = string.data(using: .utf8) else { throw BridgeError.badResponse }
     do {
         return try JSONDecoder().decode(type, from: data)
