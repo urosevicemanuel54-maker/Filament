@@ -38,7 +38,7 @@ enum BridgeError: LocalizedError {
         case .notReady:         return "Instagram session is still loading — try again in a moment."
         case .badResponse:      return "Couldn't read Instagram's response."
         case .challengeRequired:return "Instagram needs you to verify your account. Open Messages or Profile to finish the check."
-        case .rateLimited:      return "Instagram asked us to slow down. Please wait a few minutes."
+        case .rateLimited:      return "Instagram asked us to slow down. Filament has stopped sending requests until the block clears."
         case .sessionExpired:   return "Instagram signed us out (this can happen after several quick actions). Reopen the app or log in again."
         case .httpStatus(let c, let d):
             return d.isEmpty ? "Instagram returned an error (\(c))." : "Instagram error \(c): \(d)"
@@ -70,6 +70,10 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
     // The logged-in user, resolved once and kept for the session (profile, DMs
     // and the comment composer all need it). Cleared on logout.
     private var cachedMe: User?
+
+    // Requests currently in flight, keyed like the response cache. Two screens
+    // asking for the same thing share one request instead of sending two.
+    private var inFlight: [String: Task<String, Error>] = [:]
 
     private override init() {
         let config = WKWebViewConfiguration()
@@ -124,9 +128,13 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
         throw BridgeError.notReady
     }
 
+    /// Wait out the gap before the next call. The gap widens on its own after
+    /// Instagram has told us off, so a session that got blocked recovers more
+    /// slowly than the one that caused it.
     private func pace() async {
+        let base = RequestGovernor.shared.pacedInterval(base: minInterval)
         let elapsed = Date().timeIntervalSince(lastRequestAt)
-        let target = minInterval + Double.random(in: 0...0.3)   // jitter
+        let target = base + Double.random(in: 0...0.3)   // jitter
         let wait = target - elapsed
         if wait > 0 {
             try? await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
@@ -139,12 +147,12 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
     func feed(maxId: String?) async throws -> FeedPage {
         var body = "reason=\(maxId == nil ? "cold_start_fetch" : "pagination")"
         if let maxId { body += "&max_id=\(maxId)" }
-        let text = try await callAPI(path: "/api/v1/feed/timeline/", method: "POST", body: body, form: true)
+        let text = try await callAPI(path: "/api/v1/feed/timeline/", method: "POST", body: body, form: true, ttl: 60)
         return try ModelDecoder.timeline(from: text)
     }
 
     func storiesTray() async throws -> [Story] {
-        let text = try await callAPI(path: "/api/v1/feed/reels_tray/", method: "GET")
+        let text = try await callAPI(path: "/api/v1/feed/reels_tray/", method: "GET", ttl: 180)
         return try ModelDecoder.tray(from: text)
     }
 
@@ -162,7 +170,7 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
 
     func comments(for post: Post) async throws -> [Comment] {
         let text = try await callAPI(path: "/api/v1/media/\(mediaPK(post.id))/comments/?permalink_enabled=false",
-                                     method: "GET")
+                                     method: "GET", ttl: 45)
         return try ModelDecoder.comments(from: text)
     }
 
@@ -173,21 +181,23 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
     }
 
     func storyItems(for story: Story) async throws -> [StoryItem] {
-        let text = try await callAPI(path: "/api/v1/feed/user/\(story.author.id)/story/", method: "GET")
+        let text = try await callAPI(path: "/api/v1/feed/user/\(story.author.id)/story/", method: "GET", ttl: 60)
         return try ModelDecoder.story(from: text)
     }
 
     func currentUser() async throws -> User {
         if let cachedMe { return cachedMe }
-        let text = try await callAPI(path: "/api/v1/accounts/current_user/", method: "GET")
+        let text = try await callAPI(path: "/api/v1/accounts/current_user/", method: "GET", ttl: 600)
         let user = try ModelDecoder.currentUser(from: text)
         cachedMe = user
         return user
     }
 
-    /// Forget the resolved account (logout, or a session that expired).
+    /// Forget the resolved account and every cached response (logout, or a
+    /// session that expired).
     func invalidateCache() {
         cachedMe = nil
+        ResponseCache.shared.removeAll()
     }
 
     func currentUsername() async throws -> String {
@@ -228,14 +238,14 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
     // MARK: - Profile
 
     func profile(of user: User) async throws -> UserProfile {
-        let text = try await callAPI(path: "/api/v1/users/\(user.id)/info/", method: "GET")
+        let text = try await callAPI(path: "/api/v1/users/\(user.id)/info/", method: "GET", ttl: 300)
         return try ProfileDecoder.profile(from: text)
     }
 
     func userPosts(userID: String, maxId: String?) async throws -> ProfileFeedPage {
         var path = "/api/v1/feed/user/\(userID)/?count=12"
         if let maxId { path += "&max_id=\(maxId)" }
-        let text = try await callAPI(path: path, method: "GET")
+        let text = try await callAPI(path: path, method: "GET", ttl: 240)
         return try ProfileDecoder.feed(from: text)
     }
 
@@ -245,7 +255,7 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
         let me = try await currentUser()
         let text = try await callAPI(
             path: "/api/v1/direct_v2/inbox/?use_unified_inbox=true&persistentBadging=true",
-            method: "GET")
+            method: "GET", ttl: 45)
         return try DirectDecoder.threads(from: text, meID: me.id)
     }
 
@@ -281,8 +291,43 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
     // MARK: - Core: run fetch() inside IG's origin
 
     private func callAPI(path: String, method: String = "GET",
-                         body: String? = nil, form: Bool = false) async throws -> String {
+                         body: String? = nil, form: Bool = false,
+                         ttl: TimeInterval = 0) async throws -> String {
+        let key = "\(method) \(path) \(body ?? "")"
+
+        // Fresh enough already: no request at all.
+        if let fresh = ResponseCache.shared.fresh(for: key, ttl: ttl) { return fresh }
+
+        // The same request is already out: share it rather than send two.
+        if let existing = inFlight[key] { return try await existing.value }
+
+        // Instagram asked us to slow down. Honour it before the webview, the
+        // network or the pacing wait — and show what we already have.
+        if RequestGovernor.shared.isCoolingDown {
+            if let stale = ResponseCache.shared.entry(for: key) { return stale.text }
+            throw BridgeError.rateLimited
+        }
+
         try await ensureReady()
+
+        let task = Task { try await self.perform(path: path, method: method,
+                                                 body: body, form: form, key: key) }
+        inFlight[key] = task
+        defer { inFlight[key] = nil }
+
+        do {
+            return try await task.value
+        } catch BridgeError.rateLimited {
+            // A stale body beats a dead screen while the block clears.
+            if let stale = ResponseCache.shared.entry(for: key) { return stale.text }
+            throw BridgeError.rateLimited
+        }
+    }
+
+    /// The actual trip: paced, sent through the hidden webview's own origin, and
+    /// recorded in the cache and the governor.
+    private func perform(path: String, method: String, body: String?,
+                         form: Bool, key: String) async throws -> String {
         await pace()
 
         // callAsyncJavaScript wraps this in an async fn, so top-level await works
@@ -296,9 +341,11 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
         // `window` so it survives across calls (the bridge page loads once).
         let js = """
         if (typeof window.__strandClaim === 'undefined') { window.__strandClaim = '0'; }
-        // Rollout hash that IG's real web AJAX calls send; cache it once.
+        // Rollout hash that IG's real web AJAX calls send; cache it once. When
+        // it can't be found we send NO header at all — a fabricated "1" is a
+        // signature no real client has.
         if (typeof window.__strandAjax === 'undefined') {
-            var ajax = '1';
+            var ajax = '';
             try {
                 if (window._sharedData && window._sharedData.rollout_hash) { ajax = window._sharedData.rollout_hash; }
                 else { var mm = document.documentElement.innerHTML.match(/"rollout_hash":"([^"]+)"/); if (mm) { ajax = mm[1]; } }
@@ -309,9 +356,9 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
             'X-IG-App-ID': appID,
             'X-ASBD-ID': asbdID,
             'X-IG-WWW-Claim': window.__strandClaim,
-            'X-Instagram-AJAX': window.__strandAjax,
             'X-Requested-With': 'XMLHttpRequest'
         };
+        if (window.__strandAjax) { headers['X-Instagram-AJAX'] = window.__strandAjax; }
         const csrf = (document.cookie.split('; ').find(c => c.indexOf('csrftoken=') === 0) || '').split('=')[1];
         if (csrf) { headers['X-CSRFToken'] = csrf; }
         const opts = { method: method, headers: headers, credentials: 'include' };
@@ -349,6 +396,9 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
         }
         if status == 429 || text.contains("feedback_required")
             || text.contains("please wait a few minutes") {
+            // Start the cooldown BEFORE throwing, so every other screen stops
+            // sending on its own instead of adding to the pile.
+            RequestGovernor.shared.registerRateLimit()
             throw BridgeError.rateLimited
         }
         guard (200..<300).contains(status) else {
@@ -362,6 +412,10 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
             await SessionManager.shared.refresh()
             throw BridgeError.sessionExpired
         }
+        // Keep it: to answer the next repeat request inside its TTL, and as the
+        // fallback for the next time Instagram blocks us.
+        ResponseCache.shared.store(text, for: key)
+        RequestGovernor.shared.registerSuccess()
         return text
     }
 

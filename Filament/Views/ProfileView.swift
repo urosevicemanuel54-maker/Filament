@@ -10,6 +10,7 @@ import SwiftUI
 
 struct ProfileView: View {
     @EnvironmentObject private var session: SessionManager
+    @ObservedObject private var governor = RequestGovernor.shared
 
     @State private var profile: UserProfile?
     @State private var posts: [Post] = []
@@ -27,16 +28,21 @@ struct ProfileView: View {
 
     var body: some View {
         NavigationStack {
-            Group {
-                if let profile {
-                    content(profile)
-                } else if let errorMessage {
-                    ContentUnavailableView("Couldn't load profile",
-                                           systemImage: "person.slash",
-                                           description: Text(errorMessage))
-                } else {
-                    ProgressView()
+            VStack(spacing: 0) {
+                if governor.isCoolingDown {
+                    SlowedDownBanner { Task { await load() } }
+                    Divider()
+                } else if let errorMessage, profile != nil {
+                    // A failed reload keeps the profile on screen and says so.
+                    Text(errorMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                    Divider()
                 }
+                bodyContent(profile)
             }
             .navigationTitle(profile?.username ?? "Profile")
             .navigationBarTitleDisplayMode(.inline)
@@ -50,6 +56,25 @@ struct ProfileView: View {
             .task {
                 if profile == nil { await load() }
             }
+        }
+    }
+
+    @ViewBuilder
+    private func bodyContent(_ profile: UserProfile?) -> some View {
+        if let profile {
+            content(profile)
+        } else if let errorMessage {
+            ContentUnavailableView {
+                Label("Couldn't load profile", systemImage: "person.slash")
+            } description: {
+                Text(errorMessage)
+            } actions: {
+                Button("Try Again") { Task { await load() } }
+                    .disabled(governor.isCoolingDown)
+            }
+        } else {
+            ProgressView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
     }
 
@@ -171,6 +196,8 @@ struct ProfileView: View {
             hasMore = page.moreAvailable
             ImagePrefetcher.shared.prefetch(posts.prefix(6).compactMap { $0.imageURLs.first })
         } catch {
+            // Whatever loaded stays on screen; the header only shows the error
+            // when there is nothing else to show.
             errorMessage = error.localizedDescription
         }
         isLoading = false

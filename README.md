@@ -50,6 +50,34 @@ Filament is not a `WKWebView` pointed at instagram.com with CSS hidden:
   `direct_v2` and `/users/{pk}/info/`. Instagram's web DM UI is reachable only
   from the Messages error state, as a fallback.
 
+### Getting told to "slow down"
+
+Instagram rate-limits accounts that behave like a bot: once it answers
+`feedback_required` ("please wait a few minutes"), **every further request
+restarts its timer**. Each screen used to retry independently — the tab tasks,
+the manual Retry buttons, the DM poll loop — so the block could never clear and
+all three tabs were dead.
+
+One object now owns that state, `Managers/RequestGovernor.swift`:
+
+- A single cooldown, escalated 1m → 3m → 10m → 20m → 30m when it happens again,
+  persisted in `UserDefaults` so relaunching does not immediately re-trigger it.
+- While it holds, the bridge refuses to send anything at all — no webview call,
+  no network, no pacing wait. Not a retry, not a poll.
+- Pacing between calls widens automatically after a strike.
+
+`Managers/ResponseCache.swift` keeps every successful body, in memory and on
+disk, with a per-endpoint TTL (feed 60s, inbox 45s, profile 5m, current user
+10m). Two consequences: revisiting a tab inside its TTL sends nothing, and
+during a cooldown the last good body is served instead of an error, so the app
+shows slightly stale content rather than three blank screens. `SlowedDownBanner`
+says so, counts the cooldown down, and offers Retry only once it can work.
+
+Other cuts to the request volume: identical in-flight requests are coalesced,
+the DM poll moved from 6s to 20s and stops while cooling or after a failure, the
+stories tray waits for the first feed page instead of starting with it, and a
+failed refresh no longer wipes what is already on screen.
+
 ## Features
 
 | Area | Status | Notes |
@@ -123,6 +151,8 @@ Filament/
 │   ├── SessionManager.swift      Auth state via sessionid cookie
 │   ├── InstagramAPIBridge.swift  Hidden webview → private API reads
 │   ├── WebActionBridge.swift     Hidden webview → real-UI writes
+│   ├── RequestGovernor.swift     One shared cooldown + adaptive pacing
+│   ├── ResponseCache.swift       Per-endpoint TTL cache, memory + disk
 │   ├── FastDecode.swift          JSON → models; Swift and Rust backends
 │   └── ImagePrefetcher.swift     Cache warming for the next page
 ├── Models/
@@ -132,7 +162,8 @@ Filament/
 └── Views/
     ├── MainTabView.swift, FeedView.swift, StoriesView.swift,
     ├── StoryPlayerView.swift, MessagesView.swift, ProfileView.swift,
-    ├── AuthenticationView.swift, ConstrainedInstagramWebView.swift
+    ├── AuthenticationView.swift, ConstrainedInstagramWebView.swift,
+    ├── SlowedDownBanner.swift
 rust/filament-core/               Rust port of the mapping, C ABI, recorded cases
 ```
 

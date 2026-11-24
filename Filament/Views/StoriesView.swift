@@ -16,6 +16,12 @@ final class StoriesViewModel: ObservableObject {
 
     func load() async {
         guard stories.isEmpty else { return }
+        // The tray used to go out at the same instant as the first feed page,
+        // so a cold start was five requests inside two seconds — precisely the
+        // burst that gets an account told to slow down. One page first, then the
+        // tray.
+        try? await Task.sleep(nanoseconds: 1_500_000_000)
+        guard !Task.isCancelled, !RequestGovernor.shared.isCoolingDown else { return }
         stories = (try? await InstagramAPIBridge.shared.storiesTray()) ?? []
     }
 }

@@ -20,10 +20,23 @@ final class FeedViewModel: ObservableObject {
     private var nextMaxId: String?
 
     func loadInitial() async {
+        // A refresh that fails must not wipe the feed: hold the old state and
+        // put it back if the reload came away empty.
+        let previousPosts = posts
+        let previousMaxId = nextMaxId
+        let previousHasMore = hasMore
+
         nextMaxId = nil
         hasMore = true
         posts = []
+
         await loadMore()
+
+        if posts.isEmpty, !previousPosts.isEmpty, errorMessage != nil {
+            posts = previousPosts
+            nextMaxId = previousMaxId
+            hasMore = previousHasMore
+        }
     }
 
     func loadMore() async {
@@ -47,25 +60,36 @@ final class FeedViewModel: ObservableObject {
 
 struct FeedView: View {
     @StateObject private var model = FeedViewModel()
+    @ObservedObject private var governor = RequestGovernor.shared
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                LazyVStack(spacing: 0) {
-                    StoriesView()
+            VStack(spacing: 0) {
+                if governor.isCoolingDown {
+                    SlowedDownBanner { Task { await model.loadInitial() } }
                     Divider()
-                    ForEach(model.posts) { post in
-                        PostView(post: post)
-                        Divider()
-                    }
-                    footer
                 }
+                scroll
             }
             .navigationTitle("Filament")
             .navigationBarTitleDisplayMode(.inline)
-            .refreshable { await model.loadInitial() }
-            .task { if model.posts.isEmpty { await model.loadInitial() } }
         }
+    }
+
+    private var scroll: some View {
+        ScrollView {
+            LazyVStack(spacing: 0) {
+                StoriesView()
+                Divider()
+                ForEach(model.posts) { post in
+                    PostView(post: post)
+                    Divider()
+                }
+                footer
+            }
+        }
+        .refreshable { await model.loadInitial() }
+        .task { if model.posts.isEmpty { await model.loadInitial() } }
     }
 
     @ViewBuilder
@@ -79,6 +103,7 @@ struct FeedView: View {
                     .foregroundStyle(.secondary)
                     .multilineTextAlignment(.center)
                 Button("Retry") { Task { await model.loadMore() } }
+                    .disabled(governor.isCoolingDown)
             }
             .padding(24)
         } else if model.hasMore {

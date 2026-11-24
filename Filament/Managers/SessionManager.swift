@@ -34,6 +34,7 @@ final class SessionManager: ObservableObject {
         let records = await store.dataRecords(ofTypes: types)
         await store.removeData(ofTypes: types, for: records)
         InstagramAPIBridge.shared.invalidateCache()
+        RequestGovernor.shared.reset()
         isAuthenticated = false
     }
 }

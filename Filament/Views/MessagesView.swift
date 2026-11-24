@@ -11,6 +11,8 @@ import Combine
 import SwiftUI
 
 struct MessagesView: View {
+    @ObservedObject private var governor = RequestGovernor.shared
+
     @State private var threads: [DirectThread] = []
     @State private var isLoading = true
     @State private var errorMessage: String?
@@ -18,31 +20,22 @@ struct MessagesView: View {
 
     var body: some View {
         NavigationStack {
-            Group {
-                if !threads.isEmpty {
-                    List(threads) { thread in
-                        NavigationLink {
-                            DirectThreadView(thread: thread)
-                        } label: {
-                            ThreadRow(thread: thread)
-                        }
-                    }
-                    .listStyle(.plain)
-                } else if isLoading {
-                    ProgressView()
-                } else if let errorMessage {
-                    ContentUnavailableView {
-                        Label("Couldn't load messages", systemImage: "exclamationmark.bubble")
-                    } description: {
-                        Text(errorMessage)
-                    } actions: {
-                        Button("Try Again") { Task { await load() } }
-                        Button("Use Instagram's web interface") { showWebFallback = true }
-                    }
-                } else {
-                    ContentUnavailableView("No messages", systemImage: "bubble.left",
-                                           description: Text("Conversations you start on Instagram show up here."))
+            VStack(spacing: 0) {
+                if governor.isCoolingDown {
+                    SlowedDownBanner { Task { await load() } }
+                    Divider()
+                } else if let errorMessage, !threads.isEmpty {
+                    // A failed refresh keeps the list and says so, instead of
+                    // replacing everything with an error screen.
+                    Text(errorMessage)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 6)
+                    Divider()
                 }
+                content
             }
             .navigationTitle("Messages")
             .task {
@@ -52,6 +45,36 @@ struct MessagesView: View {
             .sheet(isPresented: $showWebFallback) {
                 webFallback
             }
+        }
+    }
+
+    @ViewBuilder
+    private var content: some View {
+        if !threads.isEmpty {
+            List(threads) { thread in
+                NavigationLink {
+                    DirectThreadView(thread: thread)
+                } label: {
+                    ThreadRow(thread: thread)
+                }
+            }
+            .listStyle(.plain)
+        } else if isLoading {
+            ProgressView()
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if let errorMessage {
+            ContentUnavailableView {
+                Label("Couldn't load messages", systemImage: "exclamationmark.bubble")
+            } description: {
+                Text(errorMessage)
+            } actions: {
+                Button("Try Again") { Task { await load() } }
+                    .disabled(governor.isCoolingDown)
+                Button("Use Instagram's web interface") { showWebFallback = true }
+            }
+        } else {
+            ContentUnavailableView("No messages", systemImage: "bubble.left",
+                                   description: Text("Conversations you start on Instagram show up here."))
         }
     }
 
@@ -79,6 +102,7 @@ struct MessagesView: View {
         do {
             threads = try await InstagramAPIBridge.shared.inbox()
         } catch {
+            // Keep whatever we already have on screen.
             errorMessage = error.localizedDescription
         }
         isLoading = false
@@ -127,6 +151,8 @@ private struct ThreadRow: View {
 struct DirectThreadView: View {
     let thread: DirectThread
 
+    @ObservedObject private var governor = RequestGovernor.shared
+
     @State private var messages: [DirectMessage] = []
     @State private var draft = ""
     @State private var meID = ""
@@ -134,10 +160,16 @@ struct DirectThreadView: View {
     @State private var isSending = false
     @State private var errorMessage: String?
 
-    private let poll = Timer.publish(every: 6, on: .main, in: .common).autoconnect()
+    // 20s, not 6: a thread open for five minutes was 50 requests, which on its
+    // own is enough to get an account told to slow down.
+    private let poll = Timer.publish(every: 20, on: .main, in: .common).autoconnect()
 
     var body: some View {
         VStack(spacing: 0) {
+            if governor.isCoolingDown {
+                SlowedDownBanner { Task { await load() } }
+                Divider()
+            }
             conversation
             if let errorMessage {
                 Text(errorMessage)
@@ -153,7 +185,9 @@ struct DirectThreadView: View {
         .navigationBarTitleDisplayMode(.inline)
         .task { await load() }
         .onReceive(poll) { _ in
-            guard !isSending else { return }
+            // Never poll through a cooldown or past a failure: that is exactly
+            // the loop that keeps Instagram's block alive.
+            guard !isSending, !governor.isCoolingDown, errorMessage == nil else { return }
             Task { await refresh() }
         }
     }
