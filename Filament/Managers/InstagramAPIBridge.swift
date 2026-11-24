@@ -11,6 +11,7 @@
 
 import Foundation
 import Combine
+import CryptoKit
 import WebKit
 import UIKit
 
@@ -68,10 +69,12 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
     private var didStart = false
     private var readySignaled = false
 
-    // Human-pacing: small jittered gap between API calls. Kept modest so the app
-    // feels responsive; still non-uniform (not machine-gun) for anti-detection.
+    // Reads are deliberately slow: the pacing verified against current
+    // browser-origin clients is ~4s between reads. At the old 0.4s the app
+    // looked like a bot and got the account cooled down within a session.
     private var lastRequestAt = Date.distantPast
-    private let minInterval: TimeInterval = 0.4
+    private let minInterval: TimeInterval = 4.0
+    private let writeInterval: TimeInterval = 12.0
 
     // Standard Instagram web app id — sent so the API accepts our fetch().
     private let appID = "936619743392459"
@@ -141,8 +144,8 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
     /// Wait out the gap before the next call. The gap widens on its own after
     /// Instagram has told us off, so a session that got blocked recovers more
     /// slowly than the one that caused it.
-    private func pace() async {
-        let base = RequestGovernor.shared.pacedInterval(base: minInterval)
+    private func pace(isWrite: Bool) async {
+        let base = RequestGovernor.shared.pacedInterval(base: isWrite ? writeInterval : minInterval)
         let elapsed = Date().timeIntervalSince(lastRequestAt)
         let target = base + Double.random(in: 0...0.3)   // jitter
         let wait = target - elapsed
@@ -155,7 +158,14 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
     // MARK: - Public API
 
     func feed(maxId: String?) async throws -> FeedPage {
+        // Form fields taken from instagram-go's GetTimeline: a bare
+        // `reason=...` body is not what the web client sends.
         var body = "reason=\(maxId == nil ? "cold_start_fetch" : "pagination")"
+            + "&is_pull_to_refresh=0"
+            + "&phone_id=00000000-0000-0000-0000-000000000000"
+            + "&battery_level=100"
+            + "&is_charging=1"
+            + "&will_sound_on=0"
         if let maxId { body += "&max_id=\(maxId)" }
         let text = try await callAPI(path: "/api/v1/feed/timeline/", method: "POST", body: body, form: true, ttl: 60)
         return try ModelDecoder.timeline(from: text)
@@ -195,8 +205,12 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
         // The web story viewer asks `/feed/reels_media/` — the same family as
         // `reels_tray`, which still answers — so try that first.
         do {
-            let text = try await callAPI(path: "/api/v1/feed/reels_media/?reel_ids=\(story.author.id)",
-                                         method: "GET", ttl: 60)
+            // POST with one `reel_ids[]` per reel and `source` — the verified
+            // form in instagram-go's GetReelsMedia. The previous GET with a
+            // comma-joined `reel_ids` was not a request the client makes.
+            let body = "reel_ids[]=\(story.author.id)&source=reel_feed_timeline"
+            let text = try await callAPI(path: "/api/v1/feed/reels_media/", method: "POST",
+                                         body: body, form: true, ttl: 60)
             let items = try SwiftModelDecoder.reelsMedia(from: text)
             if !items.isEmpty { return items }
         } catch BridgeError.rateLimited {
@@ -213,12 +227,49 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
         return try ModelDecoder.story(from: text)
     }
 
+    /// Mark a viewed story segment as seen. The v2 endpoint takes one form key
+    /// per reel, valued `<media_pk>_<reel_id>_<taken_at>` — verified against
+    /// instagram-go's MarkStorySeen. Called by the player, not by a tab load,
+    /// so it never adds to the read budget.
+    func markStorySeen(item: StoryItem, reelID: String) async throws {
+        guard !reelID.isEmpty else { return }
+        let key = "\(item.id)_\(reelID)_\(Int(item.takenAt.timeIntervalSince1970))"
+        let body = "reels[\(reelID)][]=\(formEncode(key))&container_module=feed_timeline"
+        _ = try await callAPI(path: "/api/v2/media/seen/", method: "POST",
+                              body: body, form: true)
+    }
+
+    /// Resolve the logged-in user by numeric ID.
+    ///
+    /// This used to call `/api/v1/accounts/current_user/`. Both instagram-go
+    /// and igflare document that this endpoint frequently answers with a
+    /// redirect-to-login on a *healthy* web session, so it was making every
+    /// feature — feed, stories, inbox, profile — look logged out. The stable
+    /// route on a web session is the same `/users/{pk}/info/` used for session
+    /// validation by those clients. The pk comes from the `ds_user_id` cookie.
     func currentUser() async throws -> User {
         if let cachedMe { return cachedMe }
-        let text = try await callAPI(path: "/api/v1/accounts/current_user/", method: "GET", ttl: 600)
+        guard let id = await sessionUserID() else {
+            throw BridgeError.sessionExpired
+        }
+        let text = try await callAPI(path: "/api/v1/users/\(id)/info/", method: "GET", ttl: 600)
         let user = try ModelDecoder.currentUser(from: text)
         cachedMe = user
         return user
+    }
+
+    /// `ds_user_id` is the authoritative account id on a web session. Fall back
+    /// to the numeric prefix of `sessionid`, which carries the same id.
+    private func sessionUserID() async -> String? {
+        let cookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
+        let igCookies = cookies.filter { $0.domain.contains("instagram.com") }
+        if let ds = igCookies.first(where: { $0.name == "ds_user_id" }), !ds.value.isEmpty {
+            return ds.value
+        }
+        if let session = igCookies.first(where: { $0.name == "sessionid" }) {
+            return session.value.split(separator: ":").first.map(String.init)
+        }
+        return nil
     }
 
     /// Forget the resolved account and every cached response (logout, or a
@@ -310,23 +361,34 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
     func inbox() async throws -> [DirectThread] {
         let me = try await currentUser()
         let text = try await callAPI(
-            path: "/api/v1/direct_v2/inbox/?folder=0&limit=20&thread_message_limit=10&persistentBadging=true&use_unified_inbox=true",
+            path: "/api/v1/direct_v2/inbox/?limit=20&thread_message_limit=1&visual_message_return_type=unseen&persistentBadging=true",
             method: "GET", ttl: 45)
         return try DirectDecoder.threads(from: text, meID: me.id)
     }
 
     func thread(id: String, meID: String) async throws -> DirectThreadContent {
         let text = try await callAPI(
-            path: "/api/v1/direct_v2/threads/\(id)/?use_unified_inbox=true",
+            path: "/api/v1/direct_v2/threads/\(id)/?limit=20&visual_message_return_type=unseen",
             method: "GET")
         return try DirectDecoder.content(from: text, meID: meID)
     }
 
     func sendMessage(threadID: String, text: String) async throws {
+        let context = UUID().uuidString.lowercased()
+        var digits = UInt64(0)
+        for byte in SHA256.hash(data: Data(context.utf8)).prefix(8) {
+            digits = (digits << 8) | UInt64(byte)
+        }
+        let offlineID = String(digits & 0x7FFF_FFFF_FFFF_FFFF)
+        // Verified against instagram-go's broadcastDirectText: the same
+        // client_context must also be sent as mutation_token and as the seed
+        // for offline_threading_id, or the broadcast can be duplicated.
         let body = "action=send_item"
             + "&thread_ids=[\(threadID)]"
             + "&text=\(formEncode(text))"
-            + "&client_context=\(UUID().uuidString.lowercased())"
+            + "&client_context=\(context)"
+            + "&mutation_token=\(context)"
+            + "&offline_threading_id=\(offlineID)"
         _ = try await callAPI(path: "/api/v1/direct_v2/threads/broadcast/text/",
                               method: "POST", body: body, form: true)
     }
@@ -384,7 +446,7 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
     /// recorded in the cache and the governor.
     private func perform(path: String, method: String, body: String?,
                          form: Bool, key: String) async throws -> String {
-        await pace()
+        await pace(isWrite: method != "GET")
 
         // callAsyncJavaScript wraps this in an async fn, so top-level await works
         // and `return` resolves it. Returning a plain object is fine (marshaled to
@@ -425,7 +487,8 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
         const resp = await fetch(path, opts);
         try { const c = resp.headers.get('x-ig-set-www-claim'); if (c) { window.__strandClaim = c; } } catch (e) {}
         const text = await resp.text();
-        return { status: resp.status, text: text };
+        return { status: resp.status, text: text,
+                 redirected: resp.redirected, url: resp.url };
         """
 
         let args: [String: Any] = [
@@ -473,10 +536,22 @@ final class InstagramAPIBridge: NSObject, ObservableObject {
         // interstitial page. Surface it clearly (instead of an opaque JSON decode
         // error downstream) and re-check whether we're still authenticated.
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if trimmed.hasPrefix("<") || text.contains("not-logged-in") || text.contains("\"require_login\"") {
-            // The cookie is still on disk but the server has disowned it. That
-            // is not something Retry can fix, so hand the user back to the
-            // login screen instead of leaving a dead error on three tabs.
+        let bouncedToLogin = (dict["redirected"] as? Bool == true)
+            || (dict["url"] as? String ?? "").contains("/accounts/login/")
+        let looksLoggedOut = trimmed.hasPrefix("<")
+            || text.contains("not-logged-in")
+            || text.contains("\"require_login\"")
+        if looksLoggedOut {
+            // A redirect to the login page on an already-validated session is
+            // how Instagram signals a soft block (verified in instagram-go),
+            // NOT a dead session. Killing cookies here is what made every
+            // feature fail moments after login.
+            if bouncedToLogin {
+                note("soft block / login redirect")
+                RequestGovernor.shared.registerRateLimit()
+                throw BridgeError.rateLimited
+            }
+            note("session rejected")
             await SessionManager.shared.sessionRejected()
             throw BridgeError.sessionExpired
         }

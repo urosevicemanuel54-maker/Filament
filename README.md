@@ -80,27 +80,35 @@ the DM poll moved from 6s to 20s and stops while cooling or after a failure, the
 stories tray waits for the first feed page instead of starting with it, and a
 failed refresh no longer wipes what is already on screen.
 
-### What actually causes the block
+### Request formats, verified against live clients (Nov 2026)
 
-Instagram's raw **write** endpoints (`/api/v1/media/{pk}/like/`, `/comment/`)
-carry none of the integrity tokens its page JavaScript attaches. Writing through
-them is the classic way an account ends up on `feedback_required` for every
-endpoint, not just the write. Likes and comments therefore go back through the
-hidden webview clicking Instagram's own buttons — invisible to the user, and an
-action Instagram trusts — with the raw endpoint only as a last resort.
+Route shapes are no longer guessed; each was checked against
+[`teslashibe/instagram-go`](https://github.com/teslashibe/instagram-go) — whose
+README documents which endpoints are live-verified — and
+[`MatheusOliveira-dev/igflare`](https://github.com/MatheusOliveira-dev/igflare),
+which extracts its headers and GraphQL queries from the official Android app:
 
-Three read paths were also pointing at endpoints the web client no longer serves,
-so they are tried in the other order now: `web_profile_info` for a profile (one
-request for the header counts *and* the first grid page, instead of two calls to
-`/users/{pk}/info/` + `/feed/user/{pk}/`), and `/feed/reels_media/` for story
-items instead of `/feed/user/{pk}/story/`. The inbox call now sends the same
-`folder`/`limit`/`thread_message_limit` parameters the web client does. Each has
-the old call as a fallback, so a wrong guess costs a request, not a screen.
-
-A profile loaded through `web_profile_info` shows its first page of posts only:
-the cursor it returns is GraphQL-shaped and not valid for the old paging
-endpoint, and guessing a cursor against an endpoint that is already refusing us
-is not worth a request.
+- `/api/v1/feed/timeline/` takes a full form body, not a bare `reason=...`:
+  `is_pull_to_refresh`, `phone_id`, `battery_level`, `is_charging`,
+  `will_sound_on` alongside `reason`/`max_id`.
+- `/api/v1/feed/reels_media/` is **POST** with one `reel_ids[]` per reel and
+  `source=reel_feed_timeline`, not a GET with a comma-joined `reel_ids`.
+- `markStorySeen` exists now: `POST /api/v2/media/seen/` with
+  `reels[<reel_id>][]=<media_pk>_<reel_id>_<taken_at>`, called once per segment
+  from the player. Missing it is one reason sessions get flagged.
+- DMs: inbox drops the ignored `folder`/`use_unified_inbox` combo for
+  `limit`/`thread_message_limit=1`/`visual_message_return_type=unseen`; threads
+  send the same `limit`/`visual_message_return_type`; sending repeats
+  `client_context` as `mutation_token` and derives `offline_threading_id` from
+  it (SHA-256 of the context, 63 bits), so a retry can't duplicate.
+- Identity: `currentUser()` resolves through `/users/{ds_user_id}/info/`
+  instead of `/accounts/current_user/`, which both references say answers
+  redirect-to-login on healthy web sessions. A redirect on an already-validated
+  session is treated as a **soft block** (cooldown, not logout) — only a real
+  rejection clears cookies and returns to the login screen.
+- Pacing: reads at ~4s apart, writes at ~12s; the exported instagram-go
+  budgets are ~15 reads/min and ~1 write/min. `RequestGovernor.pacedInterval`
+  is the one place these live.
 
 `InstagramAPIBridge.lastFailure` keeps what Instagram literally answered —
 endpoint, status and the first 180 characters of the body — and the banner shows

@@ -30,6 +30,7 @@ struct StoryPlayerView: View {
     @State private var loadFailed = false
     @State private var isPaused = false
     @State private var player: AVPlayer?
+    @State private var seenIDs: Set<String> = []
 
     @State private var pressStart = Date()
     @State private var pressing = false
@@ -198,7 +199,16 @@ struct StoryPlayerView: View {
 
     private func configureMedia() {
         teardownPlayer()
-        guard let item = currentItem, item.isVideo, let url = item.videoURL else { return }
+        guard let item = currentItem, let user = currentUser else { return }
+
+        // Mark each segment seen once, the way the real client does. This is a
+        // write, so it runs off the view's main path and failures are ignored.
+        if !seenIDs.contains(item.id) {
+            seenIDs.insert(item.id)
+            Task { try? await InstagramAPIBridge.shared.markStorySeen(item: item, reelID: user.id) }
+        }
+
+        guard item.isVideo, let url = item.videoURL else { return }
         try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .moviePlayback)
         try? AVAudioSession.sharedInstance().setActive(true)
         let p = AVPlayer(url: url)
